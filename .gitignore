@@ -1,0 +1,22 @@
+# Environment — secrets, never commit
+.env
+
+# Compiled binary (BINARY = stackpr in Makefile)
+stackpr
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.html
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+.claude/
