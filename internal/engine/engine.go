@@ -53,6 +53,29 @@ func (e *Engine) CascadeSync(ctx context.Context, stack *db.Stack, fromPosition,
 	}
 
 	for i, entry := range entries {
+		if entry.Status == "merged" {
+			// Safety net: skip entries that were marked merged but not yet removed.
+			continue
+		}
+
+		// Fetch the live PR state so we can detect merges that happened outside
+		// the webhook flow (e.g. manual merges while the server was down).
+		ghPR, err := e.gh.GetPR(ctx, stack.RepoOwner, stack.RepoName, entry.PRNumber)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to fetch PR#%d: %v", entry.PRNumber, err)
+			_ = db.UpdateEntryStatus(ctx, entry.ID, "pending")
+			_ = db.WriteSyncEvent(ctx, stack.ID, triggeredByPR, "partial", errMsg)
+			return fmt.Errorf("%s", errMsg)
+		}
+
+		if ghPR.GetMerged() {
+			// PR was merged outside the normal flow. Mark it and hand off to
+			// RetargetBase, which will retarget the next open PR's base branch
+			// and re-run a cascade sync for the remainder of the stack.
+			_ = db.MarkEntryMerged(ctx, entry.ID)
+			return e.RetargetBase(ctx, stack, entry, ghPR.GetBase().GetRef())
+		}
+
 		if err := e.gh.UpdateBranch(ctx, stack.RepoOwner, stack.RepoName, entry.PRNumber); err != nil {
 			// UpdateBranch can return a 422 when the branch is already up-to-date.
 			// Treat that as clean rather than an error.
@@ -125,6 +148,13 @@ func (e *Engine) RetargetBase(ctx context.Context, stack *db.Stack, mergedEntry 
 		return fmt.Errorf("RetargetBase load child entries: %w", err)
 	}
 
+	// Always remove the merged entry from the stack and compact positions,
+	// even if it was the last entry (no children). Leaving it in the DB would
+	// cause CascadeSync to try UpdateBranch on an already-merged PR.
+	if err := db.RemoveStackEntry(ctx, stack.ID, mergedEntry.PRNumber); err != nil {
+		return fmt.Errorf("RetargetBase remove merged entry: %w", err)
+	}
+
 	if len(childEntries) == 0 {
 		// Merged entry was the last in the stack; nothing to retarget.
 		return nil
@@ -132,14 +162,36 @@ func (e *Engine) RetargetBase(ctx context.Context, stack *db.Stack, mergedEntry 
 
 	child := childEntries[0]
 
-	// Retarget the child PR's base to the root base branch.
-	if err := e.gh.RetargetBase(ctx, stack.RepoOwner, stack.RepoName, child.PRNumber, rootBase); err != nil {
-		return fmt.Errorf("RetargetBase update PR#%d: %w", child.PRNumber, err)
+	// Check if the child is already merged on GitHub.
+	// This enables webhook-free chained-merge handling: running
+	// `stackpr stack merged <pr>` (or the server receiving one merged event)
+	// will automatically walk the entire chain of already-merged PRs and
+	// retarget / clean up each one without needing separate webhook deliveries.
+	childPR, err := e.gh.GetPR(ctx, stack.RepoOwner, stack.RepoName, child.PRNumber)
+	if err != nil {
+		return fmt.Errorf("RetargetBase fetch child PR#%d: %w", child.PRNumber, err)
 	}
 
-	// Remove the merged entry from the stack and compact positions.
-	if err := db.RemoveStackEntry(ctx, stack.ID, mergedEntry.PRNumber); err != nil {
-		return fmt.Errorf("RetargetBase remove merged entry: %w", err)
+	if childPR.GetMerged() {
+		// Child was already merged on GitHub; record it and recurse down the chain.
+		if err := db.MarkEntryMerged(ctx, child.ID); err != nil {
+			return fmt.Errorf("RetargetBase mark child PR#%d merged: %w", child.PRNumber, err)
+		}
+		// Re-fetch the child entry to get its compacted position (the parent was
+		// just removed and positions shifted down by one).
+		updatedChild, _, err := db.GetEntryByPRNumber(ctx, child.PRNumber, stack.RepoOwner, stack.RepoName)
+		if err != nil {
+			return fmt.Errorf("RetargetBase re-fetch child PR#%d: %w", child.PRNumber, err)
+		}
+		if updatedChild == nil {
+			return nil
+		}
+		return e.RetargetBase(ctx, stack, updatedChild, rootBase)
+	}
+
+	// Child is still open: retarget its base to the root base branch.
+	if err := e.gh.RetargetBase(ctx, stack.RepoOwner, stack.RepoName, child.PRNumber, rootBase); err != nil {
+		return fmt.Errorf("RetargetBase update PR#%d: %w", child.PRNumber, err)
 	}
 
 	// After compaction, the child is now at position 0 (the new root).

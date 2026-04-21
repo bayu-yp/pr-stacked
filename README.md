@@ -12,7 +12,7 @@
 Modern dev teams often have 3–5 PRs in flight simultaneously, each building on the last. The pattern — known as **stacked pull requests** — chains branches together:
 
 ```
-dev (main branch)
+main
  └─ feature/auth-model       → PR #1
      └─ feature/auth-api     → PR #2
          └─ feature/auth-ui  → PR #3
@@ -20,7 +20,7 @@ dev (main branch)
 
 This unblocks fast-moving developers, but introduces serious maintenance friction:
 
-- **Cascading manual updates** — when `dev` gets a hotfix or PR #1 receives review feedback, every downstream branch must be manually rebased/merged. In a 3-deep stack, that's three manual operations, each prone to error.
+- **Cascading manual updates** — when `main` gets a hotfix or PR #1 receives review feedback, every downstream branch must be manually rebased/merged. In a 3-deep stack, that's three manual operations, each prone to error.
 - **Conflict surface** — each merge step may produce conflicts that cascade further downstream.
 - **No native GitHub tooling** — GitHub has no concept of stacked PRs. There is no cascade UI, no automated sync, no notification when a parent-child sync is needed.
 - **Cognitive overhead** — developers must track which branch depends on which, what the current sync state is, and which PRs are blocked.
@@ -32,12 +32,12 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 **StackPR** is a Go CLI tool that:
 
 - Tracks PR relationships as ordered, named stacks
-- Monitors GitHub via webhooks for push and merge events
-- Automatically cascades merge updates down the stack
+- Automatically cascades merge updates down the stack (via webhooks or manually)
 - Detects conflicts and posts a resolution comment directly on the blocked PR
 - Retargets a child PR's base when its parent is merged
+- **Handles chained merges automatically** — when multiple PRs in a stack are merged in sequence, a single sync command walks the entire chain
 - Provides a clear view of each stack's health: `synced`, `conflict`, `pending`, `merged`
-- Supports manual sync via CLI
+- Supports manual sync via CLI — no webhook server required
 - Keeps a full audit log of every sync operation
 
 ---
@@ -76,9 +76,11 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 | `pull_request` | `closed` (merged) | PR merged → retarget child's base, cascade sync downstream |
 | `pull_request` | `closed` (not merged) | PR closed without merge → mark stack as broken, notify |
 
-**Cascade sync** walks the stack from the updated PR downward, calling the GitHub update-branch API on each child. If a child has a conflict (`mergeable_state == "dirty"`), it posts a resolution comment on the PR and halts — it does not silently skip, which would corrupt the downstream chain.
+**Cascade sync** walks the stack from the updated PR downward, calling the GitHub update-branch API on each child. During the walk it also checks whether each PR has been merged on GitHub — if so, it automatically retargets the next PR's base and continues syncing the remainder of the chain. If a child has a conflict (`mergeable_state == "dirty"`), it posts a resolution comment on the PR and halts.
 
-**Base retargeting** — when PR #1 (targeting `dev`) is merged, StackPR immediately retargets PR #2's base from `feature/auth-model` to `dev`, making it the new root, then cascades sync downward.
+**Base retargeting** — when PR #1 (targeting `main`) is merged, StackPR immediately retargets PR #2's base from `feature/auth-model` to `main`, making it the new root, then cascades sync downward.
+
+**Chained merge handling** — if multiple PRs in the stack are all merged before a sync runs, StackPR walks the entire chain automatically: it marks each merged PR, retargets the next open PR's base, and continues until it reaches an open PR or the end of the stack.
 
 ---
 
@@ -86,8 +88,10 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 
 - Named PR stacks (`stackpr stack create auth-feature`)
 - Automatic cascade sync on push/merge via GitHub webhooks
+- **Webhook-free workflow** — `stackpr stack sync` and `stackpr stack merged` detect merged PRs live from GitHub and handle the full chain without a running server
 - Conflict detection with actionable PR comments
 - Base retargeting when a parent PR is merged
+- **Chained merge support** — syncing after multiple sequential merges handles the entire chain in one pass
 - Stack health status per entry: `synced` / `conflict` / `pending` / `merged`
 - Manual sync via CLI for any stack
 - Audit log (`sync_events` table) of every sync operation
@@ -266,27 +270,39 @@ Output:
 Stack: auth-feature (myorg/myrepo)
   Position  PR    Branch                 Status    Last Synced
   --------  --    ------                 ------    -----------
-  1         #10   feature/auth-model     synced    2024-03-15 10:30:00
-  2         #11   feature/auth-api       synced    2024-03-15 10:30:05
-  3         #12   feature/auth-ui        conflict  2024-03-15 10:30:10
+  0         #10   feature/auth-model     synced    2024-03-15 10:30:00
+  1         #11   feature/auth-api       synced    2024-03-15 10:30:05
+  2         #12   feature/auth-ui        conflict  2024-03-15 10:30:10
 ```
 
 ---
 
 ### `stackpr stack sync [stack-name]`
 
-Manually trigger a cascade sync for a specific stack, or all stacks if no name is given.
+Trigger a cascade sync for a specific stack, or all stacks if no name is given.
+
+During the sync, StackPR fetches the live state of each PR from GitHub. Any PR that has been merged since the last sync is automatically marked merged, its child's base is retargeted, and the sync continues down the chain. This means a single `sync` call handles any number of sequential merges without requiring separate commands or a running webhook server.
 
 ```bash
 stackpr stack sync
 stackpr stack sync auth-feature
 ```
 
+**Typical no-webhook workflow:**
+
+```bash
+# After merging one or more PRs on GitHub:
+stackpr stack sync auth-feature
+# StackPR detects the merges, retargets child bases, and syncs the rest.
+```
+
 ---
 
 ### `stackpr stack merged <pr-number> --stack <name>`
 
-Notify StackPR that a PR was merged. Retargets the child PR's base and cascades sync. This is handled automatically via webhook when `stackpr serve` is running; use this command for manual workflows.
+Notify StackPR that a specific PR was merged. Fetches the PR's base branch from GitHub, retargets the immediate child, and cascades sync.
+
+If subsequent PRs in the chain are also already merged on GitHub, they are handled automatically in the same call — no need to run `merged` once per PR.
 
 ```bash
 stackpr stack merged 10 --stack auth-feature
@@ -295,6 +311,8 @@ stackpr stack merged 10 --stack auth-feature
 | Flag | Short | Required | Description |
 |---|---|---|---|
 | `--stack` | `-s` | Yes | Name of the stack |
+
+> **Tip:** This command is equivalent to the automatic webhook path. Use it when running without a webhook server or to re-trigger processing after a failure.
 
 ---
 
@@ -313,60 +331,61 @@ stackpr serve --port 9090
 
 ---
 
-## Web UI
+## Webhook vs. No-Webhook Workflows
 
-When running via Docker Compose, the web UI is available at **`http://localhost:3000`**.
+StackPR works in both modes:
 
-- Stacks are grouped by repository and displayed as a vertical chain
-- Each PR shows its branch name, current status, and last-synced timestamp
-- Color-coded status badges: `synced` (green), `conflict` (red), `pending` (yellow), `merged` (gray)
-- **Sync** button per stack triggers a manual cascade sync
-- Conflict note with step-by-step local resolution instructions appears when a PR is in conflict state
+**With webhook server (`stackpr serve`):**
+- GitHub automatically notifies StackPR when a PR is pushed to or merged
+- No manual commands needed after the initial setup
+- Requires the server to be publicly reachable
 
-The UI reads from the REST API exposed by `stackpr serve` (see [REST API](#rest-api) below).
-
-For local frontend development without Docker:
-
-```bash
-make web-install   # install npm deps
-make web-dev       # start Astro dev server on port 3000
-```
+**Without webhook server (CLI only):**
+- Run `stackpr stack sync <name>` after merging PRs on GitHub
+- StackPR checks GitHub live for each PR's state and handles the full merge chain automatically
+- No public server needed — works entirely from your local machine
 
 ---
 
 ## Example Workflow
 
+### With webhooks
+
 ```bash
-# 1. Initialize StackPR
+# 1. Initialize
 stackpr init
-#    > GitHub repo owner: myorg
-#    > GitHub repo name: myrepo
 
-# 2. Create a named stack
+# 2. Create a stack and add PRs in order (root first)
 stackpr stack create auth-feature
-
-# 3. Open PRs on GitHub, then add them to the stack in order
-stackpr stack add 10 --stack auth-feature   # PR #10: feature/auth-model → dev
+stackpr stack add 10 --stack auth-feature   # PR #10: feature/auth-model → main
 stackpr stack add 11 --stack auth-feature   # PR #11: feature/auth-api   → feature/auth-model
 stackpr stack add 12 --stack auth-feature   # PR #12: feature/auth-ui    → feature/auth-api
 
-# 4. Check the stack health
-stackpr stack status auth-feature
-
-# 5. Start the webhook server — GitHub will auto-sync from now on
+# 3. Start the webhook server
 stackpr serve &
 
-# 6. Push new commits to PR #10 on GitHub
-#    → StackPR receives the webhook, cascades sync to PR #11, then PR #12
+# 4. Push new commits to PR #10 on GitHub
+#    → StackPR cascades sync to PR #11, then PR #12
 
-# 7. Check status again
-stackpr stack status auth-feature
-
-# 8. A reviewer approves and merges PR #10 via GitHub UI
-#    → StackPR retargets PR #11's base from feature/auth-model → dev
+# 5. Merge PR #10 via GitHub UI
+#    → StackPR retargets PR #11's base: feature/auth-model → main
 #    → Cascades sync to PR #12
+```
 
-# 9. Or trigger manually if not using webhooks
+### Without webhooks
+
+```bash
+# 1–3. Same setup as above (no need to run stackpr serve)
+
+# 4. Merge PR #10 (and optionally PR #11) on GitHub
+
+# 5. Run sync — detects all merges and handles the full chain
+stackpr stack sync auth-feature
+#    → PR #10 detected as merged → retargets PR #11 to main
+#    → PR #11 also detected as merged → retargets PR #12 to main
+#    → PR #12 open → UpdateBranch + conflict check
+
+# Or use merged for a specific starting point:
 stackpr stack merged 10 --stack auth-feature
 ```
 
@@ -382,6 +401,8 @@ stackpr stack merged 10 --stack auth-feature
 6. Click **Add webhook**
 
 Webhook payloads are verified using HMAC-SHA256 (`X-Hub-Signature-256`) against `WEBHOOK_SECRET`.
+
+> **Tip:** Enable **Automatically delete head branches** in your GitHub repo settings (**Settings → General → Pull Requests**) so merged branches are cleaned up automatically.
 
 ---
 
