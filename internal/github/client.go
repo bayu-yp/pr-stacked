@@ -32,8 +32,11 @@ func New(token, owner, repo string) *Client {
 
 // GetPR returns a single pull request.
 func (c *Client) GetPR(ctx context.Context, owner, repo string, prNumber int) (*gogithub.PullRequest, error) {
-	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, prNumber)
+	pr, resp, err := c.gh.PullRequests.Get(ctx, owner, repo, prNumber)
 	if err != nil {
+		if resp != nil && resp.StatusCode == 401 {
+			return nil, fmt.Errorf("GetPR %d: GitHub returned 401 — check that GITHUB_TOKEN is valid and has 'repo' scope: %w", prNumber, err)
+		}
 		return nil, fmt.Errorf("GetPR %d: %w", prNumber, err)
 	}
 

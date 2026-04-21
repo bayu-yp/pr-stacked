@@ -19,30 +19,58 @@ import (
 type Server struct {
 	eng           *engine.Engine
 	webhookSecret string
-	repoOwner     string
-	repoName      string
 	mux           *http.ServeMux
 }
 
 // New creates a configured Server.
-func New(eng *engine.Engine, webhookSecret, repoOwner, repoName string) *Server {
+func New(eng *engine.Engine, webhookSecret string) *Server {
 	s := &Server{
 		eng:           eng,
 		webhookSecret: webhookSecret,
-		repoOwner:     repoOwner,
-		repoName:      repoName,
 		mux:           http.NewServeMux(),
 	}
 
 	s.mux.HandleFunc("POST /webhook", s.handleWebhook)
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
 
+	s.mux.HandleFunc("GET /api/stacks", s.handleAPIListStacks)
+	s.mux.HandleFunc("GET /api/stacks/{stackID}", s.handleAPIGetStack)
+	s.mux.HandleFunc("GET /api/stacks/{stackID}/entries", s.handleAPIGetEntries)
+	s.mux.HandleFunc("POST /api/stacks/{stackID}/sync", s.handleAPISync)
+	s.mux.HandleFunc("GET /api/stacks/{stackID}/events", s.handleAPIGetSyncEvents)
+
 	return s
 }
 
 // Handler returns the http.Handler for use with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return corsMiddleware(s.mux)
+}
+
+// corsMiddleware adds CORS headers to all responses and handles preflight requests.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeJSON encodes v as JSON and writes it with the given status code.
+func writeJSON(w http.ResponseWriter, statusCode int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// apiError is the standard JSON error body for API responses.
+type apiError struct {
+	Error string `json:"error"`
 }
 
 // handleHealth is a simple liveness endpoint.
@@ -211,6 +239,78 @@ func (s *Server) verifySignature(signatureHeader string, body []byte) error {
 	}
 
 	return nil
+}
+
+// --- API handlers ---
+
+func (s *Server) handleAPIListStacks(w http.ResponseWriter, r *http.Request) {
+	stacks, err := db.ListStacks(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stacks == nil {
+		stacks = []*db.Stack{}
+	}
+	writeJSON(w, http.StatusOK, stacks)
+}
+
+func (s *Server) handleAPIGetStack(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	stack, err := db.GetStackByID(r.Context(), stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, stack)
+}
+
+func (s *Server) handleAPIGetEntries(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	entries, err := db.GetAllEntries(r.Context(), stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if entries == nil {
+		entries = []*db.StackEntry{}
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (s *Server) handleAPISync(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	stack, err := db.GetStackByID(r.Context(), stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+	if err := s.eng.CascadeSync(r.Context(), stack, -1, 0); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "sync triggered"})
+}
+
+func (s *Server) handleAPIGetSyncEvents(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	events, err := db.ListSyncEvents(r.Context(), stackID, 20)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if events == nil {
+		events = []*db.SyncEvent{}
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 // --- Payload types ---

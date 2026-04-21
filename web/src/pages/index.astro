@@ -1,0 +1,74 @@
+---
+import StackList from '../components/StackList.jsx';
+
+const apiUrl = import.meta.env.PUBLIC_API_URL ?? 'http://localhost:8080';
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StackPR</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background: #f8fafc;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #1e293b;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #ffffff;
+      border-bottom: 1px solid #e2e8f0;
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    header .logo-mark {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      background: #3b82f6;
+      border-radius: 6px;
+      color: #ffffff;
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: -0.5px;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+      color: #0f172a;
+      letter-spacing: -0.3px;
+    }
+
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="logo-mark">S</span>
+    <h1>StackPR</h1>
+  </header>
+  <main>
+    <StackList apiUrl={apiUrl} client:load />
+  </main>
+</body>
+</html>

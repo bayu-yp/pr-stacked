@@ -10,33 +10,33 @@ import (
 
 // Stack represents a row in the stacks table.
 type Stack struct {
-	ID        string
-	Name      string
-	RepoOwner string
-	RepoName  string
-	CreatedAt time.Time
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	RepoOwner string    `json:"repo_owner"`
+	RepoName  string    `json:"repo_name"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // StackEntry represents a row in the stack_entries table.
 type StackEntry struct {
-	ID         string
-	StackID    string
-	PRNumber   int
-	BranchName string
-	Position   int
-	Status     string
-	LastSynced *time.Time
+	ID         string     `json:"id"`
+	StackID    string     `json:"stack_id"`
+	PRNumber   int        `json:"pr_number"`
+	BranchName string     `json:"branch_name"`
+	Position   int        `json:"position"`
+	Status     string     `json:"status"`
+	LastSynced *time.Time `json:"last_synced"`
 }
 
 // SyncEvent represents a row in the sync_events table.
 type SyncEvent struct {
-	ID           string
-	StackID      string
-	TriggeredBy  int
-	StartedAt    time.Time
-	FinishedAt   *time.Time
-	Status       string
-	ErrorMessage string
+	ID           string     `json:"id"`
+	StackID      string     `json:"stack_id"`
+	TriggeredBy  int        `json:"triggered_by"`
+	StartedAt    time.Time  `json:"started_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
+	Status       string     `json:"status"`
+	ErrorMessage string     `json:"error_message"`
 }
 
 // CreateStack inserts a new stack and returns the created row.
@@ -99,16 +99,15 @@ func GetStackByID(ctx context.Context, id string) (*Stack, error) {
 	return &s, nil
 }
 
-// ListStacks returns all stacks for a given repo.
-func ListStacks(ctx context.Context, repoOwner, repoName string) ([]*Stack, error) {
+// ListStacks returns all stacks across all repos, grouped by repo.
+func ListStacks(ctx context.Context) ([]*Stack, error) {
 	const q = `
 		SELECT id, name, repo_owner, repo_name, created_at
 		FROM stacks
-		WHERE repo_owner = $1 AND repo_name = $2
-		ORDER BY created_at ASC
+		ORDER BY repo_owner, repo_name, created_at ASC
 	`
 
-	rows, err := Pool.Query(ctx, q, repoOwner, repoName)
+	rows, err := Pool.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("ListStacks: %w", err)
 	}
@@ -329,6 +328,38 @@ func WriteSyncEvent(ctx context.Context, stackID string, triggeredBy int, status
 	}
 
 	return nil
+}
+
+// ListSyncEvents returns up to limit sync events for a stack, newest first.
+func ListSyncEvents(ctx context.Context, stackID string, limit int) ([]*SyncEvent, error) {
+	const q = `
+		SELECT id, stack_id, triggered_by, started_at, finished_at, status, error_message
+		FROM sync_events
+		WHERE stack_id = $1
+		ORDER BY started_at DESC
+		LIMIT $2
+	`
+
+	rows, err := Pool.Query(ctx, q, stackID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("ListSyncEvents: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*SyncEvent
+	for rows.Next() {
+		var e SyncEvent
+		if err := rows.Scan(&e.ID, &e.StackID, &e.TriggeredBy, &e.StartedAt, &e.FinishedAt, &e.Status, &e.ErrorMessage); err != nil {
+			return nil, fmt.Errorf("ListSyncEvents scan: %w", err)
+		}
+		events = append(events, &e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ListSyncEvents rows: %w", err)
+	}
+
+	return events, nil
 }
 
 // RetargetChildEntry updates stack entries so the child PR at removedPosition+1

@@ -91,6 +91,7 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 - Stack health status per entry: `synced` / `conflict` / `pending` / `merged`
 - Manual sync via CLI for any stack
 - Audit log (`sync_events` table) of every sync operation
+- Web UI at `http://localhost:3000` — visual stack graph, per-stack sync button, conflict notes
 
 ---
 
@@ -98,8 +99,8 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1** | Go CLI + PostgreSQL: stack management, manual sync, status, webhook server | **Current** |
-| **2** | Astro + React web UI: visual stack graph, live status, manual controls | Planned |
+| **1** | Go CLI + PostgreSQL: stack management, manual sync, status, webhook server | Done |
+| **2** | Astro + React web UI: visual stack graph, live status, manual controls | **Current** |
 | **3** | Cloud hosting with managed DB, TLS, secrets management, CI/CD (GCP or AWS) | Planned |
 
 ---
@@ -119,12 +120,17 @@ This unblocks fast-moving developers, but introduces serious maintenance frictio
 
 ```bash
 cp env.example .env
-# Edit .env — fill in all values (see Configuration below)
+# Edit .env — fill in GITHUB_TOKEN, WEBHOOK_SECRET, and Postgres values
 make docker-up
 stackpr init
 ```
 
-The webhook server starts automatically on port `8080`. Point your GitHub webhook at `http://your-server:8080/webhook`.
+This starts three services: PostgreSQL, the StackPR server, and the web UI.
+
+- **Web UI**: `http://localhost:3000`
+- **API / Webhook server**: `http://localhost:8080`
+
+Point your GitHub webhook at `http://your-server:8080/webhook`.
 
 ### Option B: Local binary
 
@@ -307,6 +313,27 @@ stackpr serve --port 9090
 
 ---
 
+## Web UI
+
+When running via Docker Compose, the web UI is available at **`http://localhost:3000`**.
+
+- Stacks are grouped by repository and displayed as a vertical chain
+- Each PR shows its branch name, current status, and last-synced timestamp
+- Color-coded status badges: `synced` (green), `conflict` (red), `pending` (yellow), `merged` (gray)
+- **Sync** button per stack triggers a manual cascade sync
+- Conflict note with step-by-step local resolution instructions appears when a PR is in conflict state
+
+The UI reads from the REST API exposed by `stackpr serve` (see [REST API](#rest-api) below).
+
+For local frontend development without Docker:
+
+```bash
+make web-install   # install npm deps
+make web-dev       # start Astro dev server on port 3000
+```
+
+---
+
 ## Example Workflow
 
 ```bash
@@ -358,18 +385,39 @@ Webhook payloads are verified using HMAC-SHA256 (`X-Hub-Signature-256`) against 
 
 ---
 
+## REST API
+
+`stackpr serve` exposes a REST API used by the web UI and available for scripting:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/healthz` | GET | Liveness probe — returns `"ok"` |
+| `/webhook` | POST | GitHub webhook receiver (HMAC-verified) |
+| `/api/stacks` | GET | List all stacks |
+| `/api/stacks/{stackID}` | GET | Get a single stack |
+| `/api/stacks/{stackID}/entries` | GET | Get ordered entries for a stack |
+| `/api/stacks/{stackID}/sync` | POST | Trigger a manual cascade sync |
+| `/api/stacks/{stackID}/events` | GET | Get last 20 sync events |
+
+All API responses are JSON. CORS is open (`*`) for local development.
+
+---
+
 ## Make Commands
 
 | Target | Description |
 |---|---|
 | `make build` | Compile the `stackpr` binary |
 | `make run` | Build and run the webhook server locally on port 8080 |
-| `make docker-up` | Start PostgreSQL and `stackpr` containers via Docker Compose |
+| `make docker-up` | Start all three services (postgres, stackpr, web) via Docker Compose |
 | `make docker-down` | Stop containers and remove the named volume |
 | `make migrate` | Run database migrations (they also run automatically on startup) |
 | `make tidy` | Tidy and verify the Go module |
 | `make lint` | Run `go vet ./...` |
 | `make test` | Run all unit tests |
+| `make web-install` | Install npm dependencies in `web/` |
+| `make web-build` | Build the Astro frontend to `web/dist/` |
+| `make web-dev` | Start Astro dev server on port 3000 |
 | `make help` | Print available targets |
 
 ---

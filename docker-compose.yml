@@ -27,6 +27,23 @@ services:
       postgres:
         condition: service_healthy
     command: ["serve", "--port", "8080"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        PUBLIC_API_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      stackpr:
+        condition: service_healthy
 
 volumes:
   pgdata:

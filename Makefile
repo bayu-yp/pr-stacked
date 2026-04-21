@@ -2,7 +2,7 @@ BINARY   := stackpr
 CMD_PATH := ./cmd/stackpr
 MODULE   := github.com/stackpr/stackpr
 
-.PHONY: build run docker-up docker-down migrate tidy lint
+.PHONY: build run docker-up docker-down migrate tidy lint web-install web-build web-dev docker-up-all
 
 ## build: Compile the stackpr binary.
 build:
@@ -41,3 +41,19 @@ test:
 ## help: Print this help message.
 help:
 	@grep -E '^## ' Makefile | sed 's/## //'
+
+## web-install: Install frontend dependencies.
+web-install:
+	cd web && npm ci
+
+## web-build: Build the frontend for production.
+web-build:
+	cd web && npm ci && npm run build
+
+## web-dev: Start the frontend dev server.
+web-dev:
+	cd web && npm run dev
+
+## docker-up-all: Build and start all services including the web frontend.
+docker-up-all:
+	docker compose up --build -d
