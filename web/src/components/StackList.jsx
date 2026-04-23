@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import StackGraph from './StackGraph.jsx';
+import CreateStackModal from './CreateStackModal.jsx';
 
 function Spinner() {
   return (
@@ -41,6 +42,7 @@ export default function StackList({ apiUrl }) {
   const [entriesByStack, setEntriesByStack] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -90,6 +92,8 @@ export default function StackList({ apiUrl }) {
           alignItems: 'center',
           justifyContent: 'space-between',
           marginBottom: '24px',
+          gap: '10px',
+          flexWrap: 'wrap',
         }}
       >
         <h2
@@ -120,42 +124,65 @@ export default function StackList({ apiUrl }) {
             </span>
           )}
         </h2>
-        <button
-          onClick={fetchAll}
-          disabled={loading}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            padding: '6px 14px',
-            background: '#ffffff',
-            color: loading ? '#94a3b8' : '#374151',
-            border: '1px solid #d1d5db',
-            borderRadius: '6px',
-            fontSize: '13px',
-            fontWeight: '500',
-            cursor: loading ? 'not-allowed' : 'pointer',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-          }}
-        >
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-            style={{ opacity: loading ? 0.5 : 1 }}
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              background: '#3b82f6',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '13px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+            }}
           >
-            <polyline points="1 4 1 10 7 10" />
-            <polyline points="23 20 23 14 17 14" />
-            <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15" />
-          </svg>
-          Refresh
-        </button>
+            + New Stack
+          </button>
+
+          <button
+            onClick={fetchAll}
+            disabled={loading}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              background: '#ffffff',
+              color: loading ? '#94a3b8' : '#374151',
+              border: '1px solid #d1d5db',
+              borderRadius: '6px',
+              fontSize: '13px',
+              fontWeight: '500',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+            }}
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              style={{ opacity: loading ? 0.5 : 1 }}
+            >
+              <polyline points="1 4 1 10 7 10" />
+              <polyline points="23 20 23 14 17 14" />
+              <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15" />
+            </svg>
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* States */}
@@ -227,21 +254,24 @@ export default function StackList({ apiUrl }) {
           <p style={{ margin: '0 0 4px', fontSize: '15px', fontWeight: '500', color: '#64748b' }}>
             No stacks found
           </p>
-          <p style={{ margin: '0', fontSize: '13px' }}>
-            Create a stack with{' '}
-            <code
-              style={{
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                background: '#f1f5f9',
-                border: '1px solid #e2e8f0',
-                borderRadius: '3px',
-                padding: '0 5px',
-                fontSize: '12px',
-              }}
-            >
-              stackpr stack create &lt;name&gt;
-            </code>
+          <p style={{ margin: '0 0 16px', fontSize: '13px' }}>
+            Create your first stack to get started.
           </p>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            style={{
+              padding: '8px 18px',
+              background: '#3b82f6',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '13px',
+              fontWeight: '500',
+              cursor: 'pointer',
+            }}
+          >
+            Create Stack
+          </button>
         </div>
       )}
 
@@ -283,11 +313,20 @@ export default function StackList({ apiUrl }) {
                   entries={entriesByStack[stack.id] ?? []}
                   apiUrl={apiUrl}
                   onSyncComplete={fetchAll}
+                  onRefresh={fetchAll}
                 />
               ))}
             </div>
           ))}
         </div>
+      )}
+
+      {showCreateModal && (
+        <CreateStackModal
+          apiUrl={apiUrl}
+          onCreated={() => { setShowCreateModal(false); fetchAll(); }}
+          onClose={() => setShowCreateModal(false)}
+        />
       )}
     </div>
   );

@@ -2,11 +2,15 @@ package db
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// ErrEntryNotFound is returned when a stack entry does not exist.
+var ErrEntryNotFound = errors.New("stack entry not found")
 
 // Stack represents a row in the stacks table.
 type Stack struct {
@@ -175,7 +179,7 @@ func RemoveStackEntry(ctx context.Context, stackID string, prNumber int) error {
 	).Scan(&removedPosition)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return fmt.Errorf("PR #%d is not in this stack", prNumber)
+			return ErrEntryNotFound
 		}
 		return fmt.Errorf("RemoveStackEntry query position: %w", err)
 	}
@@ -376,5 +380,13 @@ func RetargetChildEntry(ctx context.Context, stackID string, mergedPosition int)
 		return fmt.Errorf("RetargetChildEntry: %w", err)
 	}
 
+	return nil
+}
+
+// DeleteStack removes a stack and all its entries (cascade via FK constraint).
+func DeleteStack(ctx context.Context, stackID string) error {
+	if _, err := Pool.Exec(ctx, `DELETE FROM stacks WHERE id = $1`, stackID); err != nil {
+		return fmt.Errorf("DeleteStack: %w", err)
+	}
 	return nil
 }

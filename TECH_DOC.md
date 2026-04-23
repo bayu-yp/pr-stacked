@@ -95,14 +95,18 @@ Developers must mentally track: which branch depends on which, what the current 
 │         └──────────┘  └───────────┘                        │
 └────────────────────────────────────────────────────────────┘
 
-Phase 2: Astro UI (served as embedded static files)
-┌─────────────────────────────────┐
-│  Astro + React (embedded)       │
-│  - Stack dependency graph       │
-│  - PR status per node           │
-│  - Manual sync trigger button   │
-│  - Conflict indicators          │
-└─────────────────────────────────┘
+Phase 2: Astro UI (read-only dashboard)
+Phase 2.5: Astro UI (full management — CLI parity)
+┌──────────────────────────────────────────┐
+│  Astro + React (embedded)                │
+│  - Stack dependency graph                │
+│  - PR status per node                    │
+│  - Manual sync trigger button            │
+│  - Conflict indicators                   │
+│  - Create / delete stacks         (2.5)  │
+│  - Add / remove PR entries        (2.5)  │
+│  - Mark PR merged + cascade sync  (2.5)  │
+└──────────────────────────────────────────┘
 ```
 
 ### 3.4 CLI Commands
@@ -333,6 +337,110 @@ astro-pr-stacked/
 
 ---
 
+### Phase 2.5 — Full UI Management (CLI Parity)
+
+Extends Phase 2 by making the web UI a full management surface. All write operations previously requiring `docker compose exec stackpr stackpr ...` are now available in the browser. The CLI remains functional and is the recommended path for scripted or automated workflows.
+
+**Goal:** Zero CLI required for interactive day-to-day stack management.
+
+#### New API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/stacks` | Create a new named stack |
+| `DELETE` | `/api/stacks/{stackID}` | Delete a stack and all its entries (cascaded) |
+| `POST` | `/api/stacks/{stackID}/entries` | Add a PR to a stack (resolves branch name from GitHub) |
+| `DELETE` | `/api/stacks/{stackID}/entries/{prNumber}` | Remove a PR entry from a stack |
+| `POST` | `/api/stacks/{stackID}/entries/{prNumber}/merged` | Mark PR as merged, retarget child's base, cascade sync |
+
+#### Request / Response Shapes
+
+**`POST /api/stacks`**
+```json
+// Request
+{ "name": "auth-feature", "repo_owner": "myorg", "repo_name": "myrepo" }
+
+// Response 201
+{ "id": "uuid", "name": "auth-feature", "repo_owner": "myorg", "repo_name": "myrepo", "created_at": "..." }
+
+// Response 409 — stack name already exists for this repo
+{ "error": "stack already exists" }
+```
+
+**`POST /api/stacks/{stackID}/entries`**
+```json
+// Request
+{ "pr_number": 42 }
+
+// Response 201 — branch resolved from GitHub API
+{ "id": "uuid", "stack_id": "...", "pr_number": 42, "branch_name": "feature/auth-api", "position": 1, "status": "synced" }
+
+// Response 422 — PR not found or branch unresolvable
+{ "error": "failed to fetch PR #42 from GitHub: ..." }
+```
+
+**`DELETE /api/stacks/{stackID}/entries/{prNumber}`**
+```json
+// Response 200
+{ "ok": true }
+
+// Response 404 — PR not in this stack
+{ "error": "stack entry not found" }
+```
+
+**`POST /api/stacks/{stackID}/entries/{prNumber}/merged`**
+```json
+// Response 200
+{ "ok": true, "message": "retarget and sync triggered" }
+```
+
+**`DELETE /api/stacks/{stackID}`**
+```json
+// Response 200
+{ "ok": true }
+```
+
+#### Architectural Changes
+
+**Server holds `*github.Client` directly.** The `Add Entry` and `Mark Merged` handlers need to call `GetPR()` to resolve the head/base branch of a PR — the same call the CLI makes in `stackAddCmd` and `stackMergedCmd`. Rather than routing this through `Engine`, the `Server` struct was extended to hold a `*github.Client` field alongside the existing `*engine.Engine`:
+
+```go
+type Server struct {
+    eng           *engine.Engine
+    gh            *github.Client   // added in Phase 2.5
+    webhookSecret string
+    mux           *http.ServeMux
+}
+```
+
+The `New()` constructor signature updated accordingly: `New(eng *engine.Engine, gh *github.Client, webhookSecret string)`.
+
+**CORS updated** to allow `DELETE` in addition to `GET`, `POST`, `OPTIONS`.
+
+**`ErrEntryNotFound` sentinel** added to `db/queries.go` so `RemoveStackEntry` can signal "not found" vs. a real DB error, enabling the handler to return HTTP 404 vs. 500 correctly.
+
+#### New UI Components
+
+| Component | Purpose |
+|---|---|
+| `CreateStackModal.jsx` | Modal overlay with Stack Name, Repo Owner, Repo Name fields. Calls `POST /api/stacks`. |
+| `AddPRForm.jsx` | Inline form embedded inside a stack card. Accepts a PR number, calls `POST .../entries`. |
+| `PRNode.jsx` (modified) | Adds **Remove** and **Mark Merged** action buttons per PR row. |
+| `StackGraph.jsx` (modified) | Adds **Add PR** toggle and **Delete Stack** button in the stack card header. |
+| `StackList.jsx` (modified) | Adds **New Stack** primary button in toolbar; replaces CLI hint in empty state with an actionable button. |
+
+Destructive actions (Remove, Mark Merged, Delete Stack) use `window.confirm()` for Phase 2.5. A styled confirmation dialog system is planned for a future phase.
+
+#### UI Features Added in Phase 2.5
+
+- Create a new stack from the browser (replaces `stackpr init` + `stackpr stack create`)
+- Add a PR to a stack by number (replaces `stackpr stack add`)
+- Remove a PR entry from a stack (replaces `stackpr stack remove`)
+- Mark a PR as merged with automatic child retarget + cascade sync (replaces `stackpr stack merged`)
+- Delete an entire stack (new — no CLI equivalent beyond scripting)
+
+---
+
 ### Phase 3 — Cloud Hosting (GCP or AWS)
 
 The same Docker image from Phase 2 is deployed to a managed cloud platform. Both GCP and AWS paths are supported.
@@ -431,4 +539,5 @@ StackPR addresses a real and recurring pain point for developers who move faster
 |---|---|---|
 | 1 | Go CLI + PostgreSQL: stack management, manual sync, status, webhook server | Local Docker |
 | 2 | Astro + React web UI: visual stack graph, live status, manual controls | Local Docker |
+| 2.5 | Full UI management: create stacks, add/remove PRs, mark merged, delete stacks — CLI parity in the browser | Local Docker |
 | 3 | Production deployment with managed DB, TLS, secrets management, CI/CD | GCP or AWS |

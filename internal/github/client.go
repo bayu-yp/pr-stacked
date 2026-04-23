@@ -37,6 +37,9 @@ func (c *Client) GetPR(ctx context.Context, owner, repo string, prNumber int) (*
 		if resp != nil && resp.StatusCode == 401 {
 			return nil, fmt.Errorf("GetPR %d: GitHub returned 401 — check that GITHUB_TOKEN is valid and has 'repo' scope: %w", prNumber, err)
 		}
+		if resp != nil && resp.StatusCode == 404 {
+			return nil, fmt.Errorf("GetPR %d: PR not found — if %s/%s is a private repo, ensure GITHUB_TOKEN has the 'repo' scope (not just 'public_repo'), or that your fine-grained PAT has read access to this repository: %w", prNumber, owner, repo, err)
+		}
 		return nil, fmt.Errorf("GetPR %d: %w", prNumber, err)
 	}
 

@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import StatusBadge from './StatusBadge.jsx';
 import ConflictNote from './ConflictNote.jsx';
 
@@ -21,9 +22,46 @@ function relativeTime(timestamp) {
   return rtf.format(-diffDay, 'day');
 }
 
-export default function PRNode({ entry, repoOwner, repoName, parentBranchName }) {
+const ghostBtnBase = {
+  padding: '3px 10px',
+  fontSize: '12px',
+  fontWeight: '500',
+  borderRadius: '5px',
+  border: '1px solid',
+  cursor: 'pointer',
+  background: 'transparent',
+  lineHeight: '1.4',
+};
+
+export default function PRNode({ entry, repoOwner, repoName, parentBranchName, stackID, apiUrl, onRefresh }) {
+  const [removing, setRemoving] = useState(false);
+  const [marking, setMarking] = useState(false);
+
   const prUrl = `https://github.com/${repoOwner}/${repoName}/pull/${entry.pr_number}`;
   const synced = relativeTime(entry.last_synced);
+  const isMerged = entry.status === 'merged';
+
+  async function handleRemove() {
+    if (!window.confirm(`Remove PR #${entry.pr_number} from this stack?`)) return;
+    setRemoving(true);
+    try {
+      await fetch(`${apiUrl}/api/stacks/${stackID}/entries/${entry.pr_number}`, { method: 'DELETE' });
+      onRefresh();
+    } finally {
+      setRemoving(false);
+    }
+  }
+
+  async function handleMarkMerged() {
+    if (!window.confirm(`Mark PR #${entry.pr_number} as merged? This will retarget the child PR's base branch and trigger a cascade sync.`)) return;
+    setMarking(true);
+    try {
+      await fetch(`${apiUrl}/api/stacks/${stackID}/entries/${entry.pr_number}/merged`, { method: 'POST' });
+      onRefresh();
+    } finally {
+      setMarking(false);
+    }
+  }
 
   return (
     <div
@@ -78,11 +116,41 @@ export default function PRNode({ entry, repoOwner, repoName, parentBranchName })
             {entry.branch_name}
           </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, flexWrap: 'wrap' }}>
           <StatusBadge status={entry.status} />
           <span style={{ fontSize: '11px', color: '#94a3b8', whiteSpace: 'nowrap' }}>
             synced {synced}
           </span>
+
+          {!isMerged && onRefresh && (
+            <>
+              <button
+                onClick={handleMarkMerged}
+                disabled={marking}
+                title="Mark as merged and retarget child PR"
+                style={{
+                  ...ghostBtnBase,
+                  color: marking ? '#94a3b8' : '#475569',
+                  borderColor: '#d1d5db',
+                }}
+              >
+                {marking ? '…' : 'Merged'}
+              </button>
+              <button
+                onClick={handleRemove}
+                disabled={removing}
+                title="Remove PR from this stack"
+                style={{
+                  ...ghostBtnBase,
+                  color: removing ? '#94a3b8' : '#dc2626',
+                  borderColor: removing ? '#d1d5db' : '#fca5a5',
+                }}
+              >
+                {removing ? '…' : 'Remove'}
+              </button>
+            </>
+          )}
         </div>
       </div>
 

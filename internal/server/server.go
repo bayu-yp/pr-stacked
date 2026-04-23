@@ -6,26 +6,31 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/stackpr/stackpr/internal/db"
 	"github.com/stackpr/stackpr/internal/engine"
+	ghclient "github.com/stackpr/stackpr/internal/github"
 )
 
 // Server holds dependencies for the webhook HTTP server.
 type Server struct {
 	eng           *engine.Engine
+	gh            *ghclient.Client
 	webhookSecret string
 	mux           *http.ServeMux
 }
 
 // New creates a configured Server.
-func New(eng *engine.Engine, webhookSecret string) *Server {
+func New(eng *engine.Engine, gh *ghclient.Client, webhookSecret string) *Server {
 	s := &Server{
 		eng:           eng,
+		gh:            gh,
 		webhookSecret: webhookSecret,
 		mux:           http.NewServeMux(),
 	}
@@ -39,6 +44,12 @@ func New(eng *engine.Engine, webhookSecret string) *Server {
 	s.mux.HandleFunc("POST /api/stacks/{stackID}/sync", s.handleAPISync)
 	s.mux.HandleFunc("GET /api/stacks/{stackID}/events", s.handleAPIGetSyncEvents)
 
+	s.mux.HandleFunc("POST /api/stacks", s.handleAPICreateStack)
+	s.mux.HandleFunc("DELETE /api/stacks/{stackID}", s.handleAPIDeleteStack)
+	s.mux.HandleFunc("POST /api/stacks/{stackID}/entries", s.handleAPIAddEntry)
+	s.mux.HandleFunc("DELETE /api/stacks/{stackID}/entries/{prNumber}", s.handleAPIRemoveEntry)
+	s.mux.HandleFunc("POST /api/stacks/{stackID}/entries/{prNumber}/merged", s.handleAPIMarkMerged)
+
 	return s
 }
 
@@ -51,7 +62,7 @@ func (s *Server) Handler() http.Handler {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -311,6 +322,209 @@ func (s *Server) handleAPIGetSyncEvents(w http.ResponseWriter, r *http.Request) 
 		events = []*db.SyncEvent{}
 	}
 	writeJSON(w, http.StatusOK, events)
+}
+
+// --- Management API handlers (Phase 2.5) ---
+
+type createStackRequest struct {
+	Name      string `json:"name"`
+	RepoOwner string `json:"repo_owner"`
+	RepoName  string `json:"repo_name"`
+}
+
+type addEntryRequest struct {
+	PRNumber int `json:"pr_number"`
+}
+
+func (s *Server) handleAPICreateStack(w http.ResponseWriter, r *http.Request) {
+	var req createStackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid request body"})
+		return
+	}
+	if req.Name == "" || req.RepoOwner == "" || req.RepoName == "" {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "name, repo_owner, and repo_name are required"})
+		return
+	}
+
+	ctx := r.Context()
+	existing, err := db.GetStackByName(ctx, req.Name, req.RepoOwner, req.RepoName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if existing != nil {
+		writeJSON(w, http.StatusConflict, apiError{Error: "stack already exists"})
+		return
+	}
+
+	stack, err := db.CreateStack(ctx, req.Name, req.RepoOwner, req.RepoName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, stack)
+}
+
+func (s *Server) handleAPIDeleteStack(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	ctx := r.Context()
+
+	stack, err := db.GetStackByID(ctx, stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+
+	if err := db.DeleteStack(ctx, stackID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAPIAddEntry(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	ctx := r.Context()
+
+	var req addEntryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid request body"})
+		return
+	}
+	if req.PRNumber <= 0 {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "pr_number must be a positive integer"})
+		return
+	}
+
+	stack, err := db.GetStackByID(ctx, stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+
+	pr, err := s.gh.GetPR(ctx, stack.RepoOwner, stack.RepoName, req.PRNumber)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: fmt.Sprintf("failed to fetch PR #%d from GitHub: %v", req.PRNumber, err)})
+		return
+	}
+	branchName := pr.GetHead().GetRef()
+	if branchName == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: fmt.Sprintf("could not determine head branch for PR #%d", req.PRNumber)})
+		return
+	}
+
+	maxPos, err := db.GetMaxPosition(ctx, stack.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	entry, err := db.AddStackEntry(ctx, stack.ID, req.PRNumber, branchName, maxPos+1)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+func (s *Server) handleAPIRemoveEntry(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	prNumberStr := r.PathValue("prNumber")
+	ctx := r.Context()
+
+	prNumber, err := strconv.Atoi(prNumberStr)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid PR number"})
+		return
+	}
+
+	stack, err := db.GetStackByID(ctx, stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+
+	if err := db.RemoveStackEntry(ctx, stack.ID, prNumber); err != nil {
+		if errors.Is(err, db.ErrEntryNotFound) {
+			writeJSON(w, http.StatusNotFound, apiError{Error: "PR not in this stack"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAPIMarkMerged(w http.ResponseWriter, r *http.Request) {
+	stackID := r.PathValue("stackID")
+	prNumberStr := r.PathValue("prNumber")
+	ctx := r.Context()
+
+	prNumber, err := strconv.Atoi(prNumberStr)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, apiError{Error: "invalid PR number"})
+		return
+	}
+
+	stack, err := db.GetStackByID(ctx, stackID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+	if stack == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: "stack not found"})
+		return
+	}
+
+	entries, err := db.GetAllEntries(ctx, stack.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	var mergedEntry *db.StackEntry
+	for _, e := range entries {
+		if e.PRNumber == prNumber {
+			mergedEntry = e
+			break
+		}
+	}
+	if mergedEntry == nil {
+		writeJSON(w, http.StatusNotFound, apiError{Error: fmt.Sprintf("PR #%d is not in this stack", prNumber)})
+		return
+	}
+
+	pr, err := s.gh.GetPR(ctx, stack.RepoOwner, stack.RepoName, prNumber)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, apiError{Error: fmt.Sprintf("failed to fetch PR #%d from GitHub: %v", prNumber, err)})
+		return
+	}
+	baseBranch := pr.GetBase().GetRef()
+
+	if err := db.MarkEntryMerged(ctx, mergedEntry.ID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	if err := s.eng.RetargetBase(ctx, stack, mergedEntry, baseBranch); err != nil {
+		writeJSON(w, http.StatusInternalServerError, apiError{Error: err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "retarget and sync triggered"})
 }
 
 // --- Payload types ---
